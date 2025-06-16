@@ -56,7 +56,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.deps.set_entry(FirewallEntry(
             name='ipset_multi_domain', 
             cidr='192.168.1.1', 
-            comment='#resolve: domain1.com,domain2.com', 
+            comment='#resolve=domain1.com,domain2.com', 
             obj_type=FirewallObjectType.IPSET
         ))
         
@@ -78,7 +78,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.deps.set_entry(FirewallEntry(
             name='ipset_duplicate_ips', 
             cidr='192.168.1.1', 
-            comment='#resolve: domain1.com,domain2.com,domain3.com', 
+            comment='#resolve=domain1.com,domain2.com,domain3.com', 
             obj_type=FirewallObjectType.IPSET
         ))
         
@@ -129,7 +129,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.deps.set_entry(FirewallEntry(
             name='alias_multi_domain', 
             cidr='0.0.0.0', 
-            comment='#resolve: primary.com,secondary.com', 
+            comment='#resolve=primary.com,secondary.com', 
             obj_type=FirewallObjectType.ALIAS
         ))
         
@@ -145,7 +145,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         expect = FirewallEntry(
             name='alias_multi_domain', 
             cidr='10.0.0.1', 
-            comment='#resolve: primary.com,secondary.com', 
+            comment='#resolve=primary.com,secondary.com', 
             obj_type=FirewallObjectType.ALIAS
         )
         actual = self.deps.object_entries[FirewallObjectType.ALIAS]['alias_multi_domain']
@@ -157,7 +157,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.deps.set_entry(FirewallEntry(
             name='ipset_with_alias_refs', 
             cidr='192.168.1.1', 
-            comment='#resolve: domain1.com', 
+            comment='#resolve=domain1.com', 
             obj_type=FirewallObjectType.IPSET
         ))
         
@@ -190,11 +190,11 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.assertNotIn('192.168.1.1', self.deps.object_content[FirewallObjectType.IPSET]['ipset_with_alias_refs'])
 
     def test_get_resolve_options(self):
-        # Test default options
+        # Test default options with new style
         entry = FirewallEntry(
             name='ipset1', 
             cidr='192.168.1.1', 
-            comment='#resolve: example.com', 
+            comment='#resolve=example.com', 
             obj_type=FirewallObjectType.IPSET
         )
         options = entry.get_resolve_options()
@@ -205,7 +205,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         entry = FirewallEntry(
             name='ipset2', 
             cidr='192.168.1.1', 
-            comment='#resolve: example.com #queries=5', 
+            comment='#resolve=example.com #queries=5', 
             obj_type=FirewallObjectType.IPSET
         )
         options = entry.get_resolve_options()
@@ -216,7 +216,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         entry = FirewallEntry(
             name='ipset3', 
             cidr='192.168.1.1', 
-            comment='#resolve: example.com #delay=1.5', 
+            comment='#resolve=example.com #delay=1.5', 
             obj_type=FirewallObjectType.IPSET
         )
         options = entry.get_resolve_options()
@@ -227,7 +227,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         entry = FirewallEntry(
             name='ipset4', 
             cidr='192.168.1.1', 
-            comment='#resolve: example.com #queries=3 #delay=2', 
+            comment='#resolve=example.com #queries=3 #delay=2', 
             obj_type=FirewallObjectType.IPSET
         )
         options = entry.get_resolve_options()
@@ -240,7 +240,7 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         self.deps.set_entry(FirewallEntry(
             name='ipset_multi_query', 
             cidr='192.168.1.1', 
-            comment='#resolve: rotating.example.com #queries=3 #delay=0.1', 
+            comment='#resolve=rotating.example.com #queries=3 #delay=0.1', 
             obj_type=FirewallObjectType.IPSET
         ))
         
@@ -279,6 +279,110 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
             
             # Should have made 3 queries as configured
             self.assertEqual(3, query_count)
+        finally:
+            # Restore the original DNS resolver
+            self.deps.dns_resolve = original_dns_resolve
+
+    def test_legacy_resolve_syntax(self):
+        # Test legacy #resolve: syntax
+        entry = FirewallEntry(
+            name='ipset_legacy', 
+            cidr='192.168.1.1', 
+            comment='#resolve: example.com #queries=3', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        # Check domains extraction
+        domains = entry.domains()
+        self.assertEqual(['example.com'], domains)
+        
+        # Check options
+        options = entry.get_resolve_options()
+        self.assertEqual(3, options['queries'])
+        
+        # Test with multiple domains
+        entry = FirewallEntry(
+            name='ipset_legacy_multi', 
+            cidr='192.168.1.1', 
+            comment='#resolve: domain1.com,domain2.com', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        domains = entry.domains()
+        self.assertEqual(['domain1.com', 'domain2.com'], domains)
+
+    def test_new_resolve_syntax_with_multiple_domains(self):
+        # Test new #resolve= syntax with multiple domains
+        entry = FirewallEntry(
+            name='ipset_new_multi', 
+            cidr='192.168.1.1', 
+            comment='#resolve=domain1.com,domain2.com,domain3.com #queries=2', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        # Check domains extraction
+        domains = entry.domains()
+        self.assertEqual(['domain1.com', 'domain2.com', 'domain3.com'], domains)
+        
+        # Check options
+        options = entry.get_resolve_options()
+        self.assertEqual(2, options['queries'])
+
+    def test_comprehensive_feature_set(self):
+        """Test that combines multiple domains, alias references, and multiple queries."""
+        # GIVEN
+        # IPSet with multiple domains, multiple queries, and alias references
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_comprehensive', 
+            cidr='192.168.1.1', 
+            comment='#resolve=domain1.com,domain2.com #queries=2 #delay=0.1', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Add special alias references that should be preserved
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_comprehensive', 
+            cidr='dc/alias-ref', 
+            comment='#resolve=domain1.com,domain2.com #queries=2 #delay=0.1', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Mock DNS resolver to return different IPs on each query
+        original_dns_resolve = self.deps.dns_resolve
+        
+        def mock_dns_resolve(domain, queries=1, delay=3.0):
+            if domain == 'domain1.com':
+                # First query returns two IPs, second query returns one more
+                if queries > 1:
+                    return ['10.0.0.1', '10.0.0.2', '10.0.0.5']
+                return ['10.0.0.1', '10.0.0.2']
+            elif domain == 'domain2.com':
+                # First query returns two IPs, second query returns one more
+                if queries > 1:
+                    return ['10.0.0.3', '10.0.0.4', '10.0.0.6']
+                return ['10.0.0.3', '10.0.0.4']
+            return original_dns_resolve(domain, queries, delay)
+        
+        # Replace the DNS resolver with our mock
+        self.deps.dns_resolve = mock_dns_resolve
+        
+        try:
+            # WHEN
+            update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+            
+            # THEN
+            # Should have all IPs from all domains plus the alias reference
+            expected_ips = [
+                '10.0.0.1', '10.0.0.2', '10.0.0.3', 
+                '10.0.0.4', '10.0.0.5', '10.0.0.6',
+                'dc/alias-ref'
+            ]
+            self.assertEqual(
+                sorted(expected_ips), 
+                sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset_comprehensive'])
+            )
+            
+            # 192.168.1.1 should be removed, but the alias ref should be preserved
+            self.assertNotIn('192.168.1.1', self.deps.object_content[FirewallObjectType.IPSET]['ipset_comprehensive'])
+            self.assertIn('dc/alias-ref', self.deps.object_content[FirewallObjectType.IPSET]['ipset_comprehensive'])
+            
         finally:
             # Restore the original DNS resolver
             self.deps.dns_resolve = original_dns_resolve

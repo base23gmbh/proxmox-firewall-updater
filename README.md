@@ -4,20 +4,22 @@ The Proxmox Firewall Updater is a Python script designed to automate the process
 
 The configuration of the firewall objects to update is done by adding a comment to the IPSet or alias with the domain name to resolve.
 
-For example, an IPSet or alias with the comment `#resolve: example.com` will be updated with the IP address(es) of `example.com`.
+For example, an IPSet or alias with the comment `#resolve=example.com` will be updated with the IP address(es) of `example.com`. 
 
 <img width="397" alt="image" src="https://github.com/simonegiacomelli/proxmox-firewall-updater/assets/3785783/85518007-756c-4804-b0a5-925b88330e02">
 
 You can also add a regular comment along with the resolve directive.
 
+> Note: The older syntax with `#resolve:` is still supported for backward compatibility, but the new syntax with `#resolve=` is preferred for consistency with other options.
+
 Note: IPSets and aliases handle IP addresses differently:
 
 - **IPSets**: 
   - Can contain multiple IP addresses from DNS resolution
-  - Support multiple comma-separated domain names (e.g., `#resolve: example.com,example.org`)
+  - Support multiple comma-separated domain names (e.g., `#resolve=example.com,example.org`)
   - All IP addresses from all domains will be included in the IPSet
   - Special entries starting with `dc/` or `guest/` (which are references to aliases) will be preserved and not removed during DNS synchronization
-  - Can perform multiple DNS queries per domain to capture more IP addresses (e.g., `#resolve: example.com #queries=3 #delay=5`)
+  - Can perform multiple DNS queries per domain to capture more IP addresses (e.g., `#resolve=example.com #queries=3 #delay=5`)
 - **Aliases**: 
   - Only use the first IP address from DNS resolution 
   - If multiple domains are specified, only the first domain is used
@@ -162,7 +164,7 @@ For more information, check out this [Proxmox Forum thread](https://forum.proxmo
 Some domains use DNS round-robin or similar techniques to distribute load, returning different IP addresses on successive DNS queries. To capture all these IP addresses, you can configure IPSets to perform multiple DNS queries:
 
 ```
-#resolve: example.com #queries=3 #delay=5
+#resolve=example.com #queries=3 #delay=5
 ```
 
 This configuration will:
@@ -177,3 +179,109 @@ The syntax options are:
 This feature is especially useful for domains that use DNS-based load balancing or geographic distribution, ensuring your firewall rules include all possible IP addresses the domain might resolve to.
 
 Note: This feature is only available for IPSets, not for aliases (which always use only the first IP address from the first query).
+
+## Configuration Syntax
+
+When configuring firewall objects for DNS resolution, you can use the following comment syntax:
+
+```
+#resolve=domain1.com,domain2.com #queries=3 #delay=5
+```
+
+### Available Options
+
+- `#resolve=domains`: Specifies one or more domain names (comma-separated) to resolve.
+- `#queries=N`: Number of DNS queries to perform for each domain (default: 1).
+- `#delay=N`: Delay in seconds between multiple queries (default: 3).
+
+### Examples
+
+1. Basic IPSet with a single domain:
+   ```
+   #resolve=example.com
+   ```
+
+2. IPSet with multiple domains:
+   ```
+   #resolve=example.com,example.org
+   ```
+
+3. IPSet with multiple queries for DNS round-robin:
+   ```
+   #resolve=load-balanced-service.com #queries=5 #delay=2
+   ```
+
+4. IPSet with multiple domains and custom queries:
+   ```
+   #resolve=service1.com,service2.com #queries=3 #delay=1
+   ```
+
+5. Alias with a single domain (only uses first IP):
+   ```
+   #resolve=example.com
+   ```
+
+> Note: For backward compatibility, the older syntax `#resolve:` is still supported, but the new `#resolve=` syntax is preferred for consistency.
+
+## Migrating from Old to New Syntax
+
+With version 3.5.0, we introduced a more consistent syntax for configuration options. While the older syntax is still supported for backward compatibility, we recommend migrating to the new syntax:
+
+### Old Syntax
+
+```
+#resolve: example.com
+```
+
+### New Syntax
+
+```
+#resolve=example.com
+```
+
+### How to Migrate
+
+You can update your firewall objects in the Proxmox web interface by editing the comments:
+
+1. Go to Datacenter → Firewall → IPSets (or Aliases)
+2. Edit the comment for each object
+3. Replace `#resolve: ` with `#resolve=` (remove the space after the colon)
+
+This will make your configuration more consistent and future-proof. The old syntax will continue to work for backward compatibility, so there is no urgency to update all at once.
+
+## Troubleshooting
+
+### DNS Resolution Issues
+
+If you're having trouble with DNS resolution:
+
+1. **Use the `--verbose` flag** to see detailed information:
+   ```
+   python3 update_firewall.py --verbose
+   ```
+
+2. **Try multiple queries** for domains with round-robin DNS:
+   ```
+   #resolve=example.com #queries=5
+   ```
+   
+3. **Verify the domain is resolvable** from your Proxmox host:
+   ```bash
+   nslookup example.com
+   ```
+
+### Multiple Queries Not Working
+
+If multiple queries (`#queries=N`) aren't returning different IP addresses:
+
+1. Verify the domain actually uses round-robin DNS or similar load balancing
+2. Try increasing the delay (`#delay=10`) to allow for DNS cache timeout
+3. Make sure your DNS server isn't caching responses locally
+
+### Alias References Not Being Preserved
+
+If your alias references (starting with `dc/` or `guest/`) aren't being preserved:
+
+1. Ensure you're using version 3.4.0 or higher
+2. Run with `--verbose` to see if the alias references are being detected
+3. Check that the alias references are properly formatted in the IPSet

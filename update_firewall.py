@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# for more information see https://github.com/simonegiacomelli/proxmox-firewall-updater
+# for more information see https://github.com/base23gmbh/proxmox-firewall-updater
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import List, Dict
 
-VERSION_STRING = f'{Path(__file__).name} version 3.4.0'
+VERSION_STRING = f'{Path(__file__).name} version 3.5.0'
 
 
 class FirewallObjectType(Enum):
@@ -31,25 +31,30 @@ class FirewallEntry:
     obj_type: FirewallObjectType
 
     def domains(self) -> List[str]:
-        """Extract domain(s) from comment if it contains #resolve: directive.
+        """Extract domain(s) from comment if it contains #resolve= directive.
         
         Returns:
             A list of domain names to resolve. For aliases, only the first domain is used.
             For IPSets, multiple comma-separated domains can be specified.
         """
         try:
-            if not self.comment or '#resolve:' not in self.comment:
-                return []
-                
-            # Extract everything after #resolve: and before the next space
-            res = self.comment.split('#resolve: ')[1].split(' ')[0]
+            # Try the new style #resolve= (preferred)
+            if self.comment and '#resolve=' in self.comment:
+                res = self.comment.split('#resolve=')[1].split(' ')[0]
+                if res:
+                    # Split by comma to support multiple domains
+                    domains = [domain.strip() for domain in res.split(',')]
+                    return [domain for domain in domains if domain]  # Filter out empty domains
             
-            if not res:
-                return []
+            # Fallback to legacy #resolve: style for backward compatibility
+            elif self.comment and '#resolve:' in self.comment:
+                res = self.comment.split('#resolve: ')[1].split(' ')[0]
+                if res:
+                    # Split by comma to support multiple domains
+                    domains = [domain.strip() for domain in res.split(',')]
+                    return [domain for domain in domains if domain]  # Filter out empty domains
                 
-            # Split by comma to support multiple domains
-            domains = [domain.strip() for domain in res.split(',')]
-            return [domain for domain in domains if domain]  # Filter out empty domains
+            return []
         except:
             return []
             
@@ -57,7 +62,7 @@ class FirewallEntry:
         """Extract resolve options from comment.
         
         Comment format can include options:
-        #resolve: domain1.com,domain2.com #queries=3 #delay=5
+        #resolve=domain1.com,domain2.com #queries=3 #delay=5
         
         Returns:
             Dictionary with the following keys:
