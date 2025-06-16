@@ -16,6 +16,7 @@ Note: IPSets and aliases handle IP addresses differently:
   - Can contain multiple IP addresses from DNS resolution
   - Support multiple comma-separated domain names (e.g., `#resolve: example.com,example.org`)
   - All IP addresses from all domains will be included in the IPSet
+  - Special entries starting with `dc/` or `guest/` (which are references to aliases) will be preserved and not removed during DNS synchronization
 - **Aliases**: 
   - Only use the first IP address from DNS resolution 
   - If multiple domains are specified, only the first domain is used

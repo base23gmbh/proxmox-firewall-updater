@@ -1,371 +1,279 @@
 #!/usr/bin/env python3
-# for more information see https://github.com/simonegiacomelli/proxmox-firewall-updater
-
 from __future__ import annotations
 
-import argparse
-import json
-import shlex
-import socket
-import subprocess
-from dataclasses import dataclass
-from enum import Enum, auto
-from pathlib import Path
-from typing import List, Dict
+import unittest
+from typing import Dict, List
 
-VERSION_STRING = f'{Path(__file__).name} version 1.0.0'
+from update_firewall import FirewallEntry, FirewallObjectType, Dependencies, update_firewall_objects, parse_entries_from_json
 
 
-class FirewallObjectType(Enum):
-    """Enum for different types of firewall objects."""
-    IPSET = auto()
-    ALIAS = auto()
+class UpdateFirewallObjectsTestCase(unittest.TestCase):
 
+    def setUp(self) -> None:
+        self.deps = DependenciesFake()
 
-@dataclass(frozen=True)
-class FirewallEntry:
-    """Base class for firewall entries that can be resolved via DNS."""
-    name: str
-    cidr: str
-    comment: str | None
-    obj_type: FirewallObjectType
+    def tearDown(self) -> None:
+        pass
 
-    def domains(self) -> List[str]:
-        """Extract domain(s) from comment if it contains #resolve: directive.
+    # IPSet Tests
+    def test_ipset_multiple_ips_should_add_and_remove_correctly(self):
+        # GIVEN
+        # Initial IPSet has two IPs
+        self.deps.set_entry(FirewallEntry(name='ipset1', cidr='192.168.1.1', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET))
+        self.deps.set_entry(FirewallEntry(name='ipset1', cidr='192.168.1.2', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET))
         
-        Returns:
-            A list of domain names to resolve. For aliases, only the first domain is used.
-            For IPSets, multiple comma-separated domains can be specified.
-        """
-        try:
-            if not self.comment or '#resolve:' not in self.comment:
-                return []
-                
-            # Extract everything after #resolve: and before the next space
-            res = self.comment.split('#resolve: ')[1].split(' ')[0]
-            
-            if not res:
-                return []
-                
-            # Split by comma to support multiple domains
-            domains = [domain.strip() for domain in res.split(',')]
-            return [domain for domain in domains if domain]  # Filter out empty domains
-        except:
-            return []
-            
-    def domain(self) -> str | None:
-        """Legacy method for backward compatibility. Returns the first domain or None."""
-        domains = self.domains()
-        return domains[0] if domains else None
+        # DNS returns different set of IPs - one to keep, one to remove, one to add
+        self.deps.dns_entries['example.com'] = ['192.168.1.1', '192.168.1.3']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+
+        # THEN
+        # Should keep 192.168.1.1, remove 192.168.1.2, and add 192.168.1.3
+        expected_ips = ['192.168.1.1', '192.168.1.3']
+        self.assertEqual(sorted(expected_ips), sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset1']))
+
+    def test_ipset_empty_dns_results_should_not_clear_ipset(self):
+        # GIVEN
+        # IPSet has entries
+        self.deps.set_entry(FirewallEntry(name='ipset1', cidr='192.168.1.1', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET))
+        self.deps.set_entry(FirewallEntry(name='ipset1', cidr='192.168.1.2', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET))
+        
+        # DNS returns empty list (could happen on temporary DNS failure)
+        self.deps.dns_entries['example.com'] = []
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+
+        # THEN
+        # Should keep the existing IPs
+        expected_ips = ['192.168.1.1', '192.168.1.2']
+        self.assertEqual(sorted(expected_ips), sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset1']))
+
+    def test_ipset_multiple_domains_should_combine_ips(self):
+        # GIVEN
+        # IPSet with multiple domains in the comment
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_multi_domain', 
+            cidr='192.168.1.1', 
+            comment='#resolve: domain1.com,domain2.com', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Set DNS entries for both domains
+        self.deps.dns_entries['domain1.com'] = ['10.0.0.1', '10.0.0.2']
+        self.deps.dns_entries['domain2.com'] = ['10.0.0.3', '10.0.0.4']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+
+        # THEN
+        # Should have IPs from both domains
+        expected_ips = ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']
+        self.assertEqual(sorted(expected_ips), sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset_multi_domain']))
+
+    def test_ipset_multiple_domains_with_duplicate_ips(self):
+        # GIVEN
+        # IPSet with multiple domains in the comment
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_duplicate_ips', 
+            cidr='192.168.1.1', 
+            comment='#resolve: domain1.com,domain2.com,domain3.com', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Some domains resolve to the same IPs
+        self.deps.dns_entries['domain1.com'] = ['10.0.0.1', '10.0.0.2']
+        self.deps.dns_entries['domain2.com'] = ['10.0.0.2', '10.0.0.3']  # Duplicates 10.0.0.2
+        self.deps.dns_entries['domain3.com'] = ['10.0.0.4']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+
+        # THEN
+        # Should have unique IPs from all domains (no duplicates)
+        expected_ips = ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']
+        self.assertEqual(sorted(expected_ips), sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset_duplicate_ips']))
+
+    # Alias Tests
+    def test_alias_should_be_updated_with_first_ip(self):
+        # GIVEN
+        self.deps.set_entry(FirewallEntry(name='alias1', cidr='0.0.0.0', comment='#resolve: example.com', obj_type=FirewallObjectType.ALIAS))
+        # DNS returns multiple IPs but only the first should be used
+        self.deps.dns_entries['example.com'] = ['1.2.3.4', '5.6.7.8']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.ALIAS)
+
+        # THEN
+        expect = FirewallEntry(name='alias1', cidr='1.2.3.4', comment='#resolve: example.com', obj_type=FirewallObjectType.ALIAS)
+        actual = self.deps.object_entries[FirewallObjectType.ALIAS]['alias1']
+        self.assertEqual(expect, actual)
+
+    def test_alias_no_dns_should_not_change(self):
+        # GIVEN
+        entry = FirewallEntry(name='alias1', cidr='0.0.0.0', comment='#resolve: example.com', obj_type=FirewallObjectType.ALIAS)
+        self.deps.set_entry(entry)
+        # No DNS entry
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.ALIAS)
+
+        # THEN
+        actual = self.deps.object_entries[FirewallObjectType.ALIAS]['alias1']
+        self.assertEqual(entry, actual)
+
+    def test_alias_with_multiple_domains_uses_only_first(self):
+        # GIVEN
+        # Alias with multiple domains in the comment (should only use the first one)
+        self.deps.set_entry(FirewallEntry(
+            name='alias_multi_domain', 
+            cidr='0.0.0.0', 
+            comment='#resolve: primary.com,secondary.com', 
+            obj_type=FirewallObjectType.ALIAS
+        ))
+        
+        # Set DNS entries for both domains
+        self.deps.dns_entries['primary.com'] = ['10.0.0.1', '10.0.0.2']
+        self.deps.dns_entries['secondary.com'] = ['20.0.0.1', '20.0.0.2']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.ALIAS)
+
+        # THEN
+        # Should only use the first IP from the first domain
+        expect = FirewallEntry(
+            name='alias_multi_domain', 
+            cidr='10.0.0.1', 
+            comment='#resolve: primary.com,secondary.com', 
+            obj_type=FirewallObjectType.ALIAS
+        )
+        actual = self.deps.object_entries[FirewallObjectType.ALIAS]['alias_multi_domain']
+        self.assertEqual(expect, actual)
+
+    def test_ipset_preserves_alias_references(self):
+        # GIVEN
+        # IPSet with DNS entries and alias references
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_with_alias_refs', 
+            cidr='192.168.1.1', 
+            comment='#resolve: domain1.com', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Add special alias references that should be preserved
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_with_alias_refs', 
+            cidr='dc/some-datacenter', 
+            comment='#resolve: domain1.com', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_with_alias_refs', 
+            cidr='guest/vm-100-disk-0', 
+            comment='#resolve: domain1.com', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Set DNS entries for the domain
+        self.deps.dns_entries['domain1.com'] = ['10.0.0.1', '10.0.0.2']
+
+        # WHEN
+        update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+
+        # THEN
+        # Should have IPs from DNS plus preserved alias references
+        expected_ips = ['10.0.0.1', '10.0.0.2', 'dc/some-datacenter', 'guest/vm-100-disk-0']
+        self.assertEqual(sorted(expected_ips), sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset_with_alias_refs']))
+        
+        # 192.168.1.1 should be removed, but the alias refs should be preserved
+        self.assertNotIn('192.168.1.1', self.deps.object_content[FirewallObjectType.IPSET]['ipset_with_alias_refs'])
 
 
-class Dependencies:
-    """Interface for managing actions on Proxmox firewall objects and DNS entries."""
+class DependenciesFake(Dependencies):
+    """Fake implementation of Dependencies interface for testing."""
 
     def __init__(self):
-        self.verbose = True
-        self.dry_run = True
-
-    def list_entries(self, obj_type: FirewallObjectType) -> List[FirewallEntry]:
-        """List all entries of the specified type."""
-        ...
-
-    def set_entry(self, entry: FirewallEntry):
-        """Add or update an entry."""
-        ...
-
-    def delete_entry(self, entry: FirewallEntry):
-        """Delete an entry."""
-        ...
-
-    def get_object_entries(self, obj_type: FirewallObjectType, name: str) -> List[str]:
-        """Get all CIDRs for a specific IPSet or Alias."""
-        ...
-
-    def dns_resolve(self, domain: str) -> List[str]:
-        """Resolve a domain to a list of IP addresses."""
-        ...
-
-
-def log(msg):
-    """Print a log message to stdout."""
-    print(msg)
-
-
-class Run:
-    """Wrapper for subprocess execution."""
-    def __init__(self, cmd, cwd=None):
-        self.cmd = cmd
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-        self.returncode = res.returncode
-        self.success = res.returncode == 0
-        self.stdout = res.stdout.decode("utf-8")
-        self.stderr = res.stderr.decode("utf-8")
-
-    def __str__(self):
-        st = 'OK' if self.success else f'FAILED status={self.returncode}'
-        return \
-            f'command={shlex.join(self.cmd)}\n' \
-            f'status={st}\n' \
-            f'stdout: ------------------------------\n' \
-            f'{self.stdout}\n' \
-            f'stderr: ------------------------------\n' \
-            f'{self.stderr}' \
-            f'end ----------------------------------\n'
-
-
-def parse_entries_from_json(json_str: str, obj_type: FirewallObjectType) -> List[FirewallEntry]:
-    """Convert JSON response to a list of FirewallEntry objects."""
-    j = json.loads(json_str)
-    result = []
-    
-    for obj in j:
-        # Get object level comment and name
-        name = obj['name']
-        comment = obj.get('comment', None)
-        
-        # Check if the object has entries field (detailed query for IPSets)
-        if 'entries' in obj and obj_type == FirewallObjectType.IPSET:
-            # Process entries if they exist
-            entries = obj.get('entries', [])
-            for entry in entries:
-                result.append(FirewallEntry(
-                    name=name,
-                    cidr=entry.get('cidr', ''),
-                    comment=comment,
-                    obj_type=obj_type
-                ))
-        else:
-            # Handle direct entries (aliases) or top-level IPSet info
-            result.append(FirewallEntry(
-                name=name,
-                cidr=obj.get('cidr', ''),
-                comment=comment,
-                obj_type=obj_type
-            ))
-    
-    return result
-
-
-def update_firewall_objects(deps: Dependencies, obj_type: FirewallObjectType):
-    """Update firewall objects of the specified type based on DNS resolution."""
-    type_name = "IPSet" if obj_type == FirewallObjectType.IPSET else "Alias"
-    
-    if deps.verbose:
-        log(f"Processing {type_name}s...")
-    
-    # Get entries with domain info
-    entries = [entry for entry in deps.list_entries(obj_type) if entry.domains()]
-    
-    if deps.verbose:
-        log(f'Found {len(entries)} {type_name.lower()} entries to check. dry-run={deps.dry_run}')
-        for entry in entries:
-            domains_str = ','.join(entry.domains())
-            log(f'  {entry.name} {domains_str} cidr={entry.cidr} {entry.comment}')
-    
-    for entry in entries:
-        domains = entry.domains()
-        
-        if obj_type == FirewallObjectType.IPSET:
-            # For IPSets, collect IPs from all domains
-            all_dns_ips = []
-            
-            # Resolve each domain and collect all unique IPs
-            for domain in domains:
-                dns_ips = deps.dns_resolve(domain)
-                if dns_ips:
-                    if deps.verbose:
-                        log(f'Domain {domain} resolved to {len(dns_ips)} IP(s): {dns_ips}')
-                    all_dns_ips.extend(dns_ips)
-                else:
-                    if deps.verbose:
-                        log(f'Cannot resolve domain `{domain}` for {type_name} `{entry.name}`')
-            
-            # Remove duplicates while preserving order
-            unique_dns_ips = []
-            for ip in all_dns_ips:
-                if ip not in unique_dns_ips:
-                    unique_dns_ips.append(ip)
-            
-            if unique_dns_ips:
-                # Get current entries in the IPSet
-                current_ips = deps.get_object_entries(obj_type, entry.name)
-                
-                if deps.verbose:
-                    log(f'{type_name} {entry.name} has {len(current_ips)} entries, DNS returned {len(unique_dns_ips)} unique addresses')
-                    
-                # Find addresses to add (in DNS but not in IPSet)
-                to_add = [ip for ip in unique_dns_ips if ip not in current_ips]
-                
-                # Find addresses to remove (in IPSet but not in DNS)
-                to_remove = [ip for ip in current_ips if ip not in unique_dns_ips]
-                
-                # Update IPSet with changes
-                if to_add or to_remove:
-                    log(f'Updating {type_name} {entry.name}:')
-                    
-                    # Remove old entries
-                    for ip in to_remove:
-                        log(f'  Removing {ip}')
-                        if not deps.dry_run:
-                            deps.delete_entry(FirewallEntry(
-                                name=entry.name, 
-                                cidr=ip, 
-                                comment=entry.comment,
-                                obj_type=obj_type
-                            ))
-                    
-                    # Add new entries
-                    for ip in to_add:
-                        log(f'  Adding {ip}')
-                        if not deps.dry_run:
-                            deps.set_entry(FirewallEntry(
-                                name=entry.name, 
-                                cidr=ip, 
-                                comment=entry.comment,
-                                obj_type=obj_type
-                            ))
-                else:
-                    if deps.verbose:
-                        log(f'{type_name} {entry.name} is up to date with DNS entries')
-            elif deps.verbose:
-                log(f'No IP addresses could be resolved for any domains in {type_name} `{entry.name}`')
-                
-        else:  # Alias objects only support a single IP and single domain
-            # For Aliases, use only the first domain and its first IP address
-            domain = domains[0]
-            dns_ips = deps.dns_resolve(domain)
-            
-            if dns_ips:
-                # For Aliases, use the first IP address only
-                ip = dns_ips[0]
-                if ip != entry.cidr:
-                    log(f'Updating {type_name} {entry.name} from {entry.cidr} to {ip}')
-                    if not deps.dry_run:
-                        deps.set_entry(FirewallEntry(
-                            name=entry.name, 
-                            cidr=ip, 
-                            comment=entry.comment,
-                            obj_type=obj_type
-                        ))
-                else:
-                    if deps.verbose:
-                        log(f'{type_name} {entry.name} is already up to date with {ip} from {domain}')
-            else:
-                if deps.verbose:
-                    log(f'Cannot resolve domain `{domain}` for {type_name} `{entry.name}`')
-
-
-class ProdDependencies(Dependencies):
-    """Production implementation of Dependencies interface."""
-    
-    def __init__(self, args):
         super().__init__()
-        self.verbose = args.verbose
-        self.dry_run = args.dry_run
-    
+        self.dry_run = False
+        self.object_entries = {
+            FirewallObjectType.IPSET: {},
+            FirewallObjectType.ALIAS: {}
+        }
+        self.object_content = {
+            FirewallObjectType.IPSET: {},
+            FirewallObjectType.ALIAS: {}
+        }
+        self.dns_entries = {}
+
     def list_entries(self, obj_type: FirewallObjectType) -> List[FirewallEntry]:
         """List all entries of the specified type."""
-        endpoint = 'ipset' if obj_type == FirewallObjectType.IPSET else 'aliases'
-        cmd = f'pvesh get cluster/firewall/{endpoint} --output-format json'.split(' ')
-        run = self._run(cmd, skip=False)
-        if not run.success:
-            return []
-        return parse_entries_from_json(run.stdout, obj_type)
-    
+        return list(self.object_entries[obj_type].values())
+
     def set_entry(self, entry: FirewallEntry):
         """Add or update an entry."""
+        self.object_entries[entry.obj_type][entry.name] = entry
+        
+        # Also add to the content list for that object
+        if entry.name not in self.object_content[entry.obj_type]:
+            self.object_content[entry.obj_type][entry.name] = []
+        
+        # For IPSets, maintain a list of CIDRs
         if entry.obj_type == FirewallObjectType.IPSET:
-            # For IPSets
-            # Add the entry
-            cmd = f'pvesh create cluster/firewall/ipset/{entry.name} --cidr {entry.cidr}'.split(' ')
-            self._run(cmd, skip=self.dry_run)
+            if entry.cidr not in self.object_content[entry.obj_type][entry.name]:
+                self.object_content[entry.obj_type][entry.name].append(entry.cidr)
         else:
-            # For Aliases
-            cmd = f'pvesh set cluster/firewall/aliases/{entry.name} --cidr {entry.cidr}'.split(' ')
-            if entry.comment:
-                cmd += ['--comment', entry.comment]
-            self._run(cmd, skip=self.dry_run)
-    
+            # For Aliases, just store the single CIDR
+            self.object_content[entry.obj_type][entry.name] = [entry.cidr]
+
     def delete_entry(self, entry: FirewallEntry):
         """Delete an entry."""
         if entry.obj_type == FirewallObjectType.IPSET:
-            cmd = f'pvesh delete cluster/firewall/ipset/{entry.name}/{entry.cidr}'.split(' ')
-            self._run(cmd, skip=self.dry_run)
-        else:
-            # Note: Aliases don't have separate entries to delete,
-            # you would update the entire alias instead
-            pass
-    
+            if entry.name in self.object_content[entry.obj_type] and entry.cidr in self.object_content[entry.obj_type][entry.name]:
+                self.object_content[entry.obj_type][entry.name].remove(entry.cidr)
+
     def get_object_entries(self, obj_type: FirewallObjectType, name: str) -> List[str]:
         """Get all CIDRs for a specific IPSet or Alias."""
-        if obj_type == FirewallObjectType.IPSET:
-            cmd = f'pvesh get cluster/firewall/ipset/{name} --output-format json'.split(' ')
-            run = self._run(cmd, skip=False)
-            if not run.success:
-                return []
-            entries = json.loads(run.stdout)
-            return [entry.get('cidr', '') for entry in entries]
-        else:
-            # Aliases only have one CIDR
-            cmd = f'pvesh get cluster/firewall/aliases/{name} --output-format json'.split(' ')
-            run = self._run(cmd, skip=False)
-            if not run.success:
-                return []
-            obj = json.loads(run.stdout)
-            return [obj.get('cidr', '')]
-    
+        return self.object_content[obj_type].get(name, [])
+
     def dns_resolve(self, domain: str) -> List[str]:
         """Resolve a domain to a list of IP addresses."""
-        try:
-            (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
-            if self.verbose:
-                log(f'{domain} resolved to `{ipaddrlist}`')
-            return ipaddrlist
-        except:
-            return []
-    
-    def _run(self, cmd, skip: bool) -> Run | None:
-        """Run a command and return the result."""
-        if self.verbose and skip:
-            log(f'dry-run: {shlex.join(cmd)}')
-        if not skip:
-            run = Run(cmd)
-            if self.verbose:
-                log(str(run))
-            return run
+        result = self.dns_entries.get(domain, [])
+        # Handle both string and list formats for backward compatibility
+        if isinstance(result, str):
+            return [result]
+        return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Update Proxmox firewall IPSet and Alias entries using DNS resolution.')
-    parser.add_argument('--dry-run', action='store_true', help='run the script without making any changes')
-    parser.add_argument('--verbose', action='store_true', help='print detailed operations information')
-    parser.add_argument('--ipsets', action='store_true', help='update IPSet entries')
-    parser.add_argument('--aliases', action='store_true', help='update Alias entries')
-    parser.add_argument('--all', action='store_true', help='update both IPSet and Alias entries')
-    parser.add_argument('--version', action='store_true', help='show version information and exit')
+class ParseEntriesFromJsonTestCase(unittest.TestCase):
     
-    args = parser.parse_args()
+    def test_parse_ipset_entries(self):
+        # GIVEN
+        ipset_json = '[{"name":"ipset_example","comment":"#resolve: example.com","entries":[{"cidr":"1.2.3.4"},{"cidr":"0.0.0.0"}]}]'
+        
+        # WHEN
+        actual = parse_entries_from_json(ipset_json, FirewallObjectType.IPSET)
+        
+        # THEN
+        expect = [
+            FirewallEntry(name='ipset_example', cidr='1.2.3.4', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET),
+            FirewallEntry(name='ipset_example', cidr='0.0.0.0', comment='#resolve: example.com', obj_type=FirewallObjectType.IPSET)
+        ]
+        self.assertEqual(expect, actual)
     
-    if args.version:
-        log(VERSION_STRING)
-        return
-    
-    deps = ProdDependencies(args)
-    
-    if args.verbose:
-        log(VERSION_STRING)
-    
-    # If no specific option is provided, default to --all
-    if not (args.ipsets or args.aliases or args.all):
-        args.all = True
-    
-    if args.ipsets or args.all:
-        update_firewall_objects(deps, FirewallObjectType.IPSET)
-    
-    if args.aliases or args.all:
-        update_firewall_objects(deps, FirewallObjectType.ALIAS)
+    def test_parse_alias_entries(self):
+        # GIVEN
+        alias_json = '[{"cidr":"1.2.3.4","comment":"#resolve: example.com","digest":"48ba54e4","ipversion":4,"name":"alias_example_com"}]'
+        
+        # WHEN
+        actual = parse_entries_from_json(alias_json, FirewallObjectType.ALIAS)
+        
+        # THEN
+        expect = [
+            FirewallEntry(name='alias_example_com', cidr='1.2.3.4', comment='#resolve: example.com', obj_type=FirewallObjectType.ALIAS)
+        ]
+        self.assertEqual(expect, actual)
 
 
 if __name__ == '__main__':
-    main()
+    unittest.main()
