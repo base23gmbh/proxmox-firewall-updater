@@ -17,6 +17,7 @@ Note: IPSets and aliases handle IP addresses differently:
   - Support multiple comma-separated domain names (e.g., `#resolve: example.com,example.org`)
   - All IP addresses from all domains will be included in the IPSet
   - Special entries starting with `dc/` or `guest/` (which are references to aliases) will be preserved and not removed during DNS synchronization
+  - Can perform multiple DNS queries per domain to capture more IP addresses (e.g., `#resolve: example.com #queries=3 #delay=5`)
 - **Aliases**: 
   - Only use the first IP address from DNS resolution 
   - If multiple domains are specified, only the first domain is used
@@ -153,3 +154,26 @@ Updating an alias:
 ## Relevant Proxmox Forum Thread
 
 For more information, check out this [Proxmox Forum thread](https://forum.proxmox.com/threads/firewall-alias-with-domainname.43036/) on firewall aliases with domain names.
+
+## Advanced Features
+
+### Multiple Queries for DNS Round-Robin
+
+Some domains use DNS round-robin or similar techniques to distribute load, returning different IP addresses on successive DNS queries. To capture all these IP addresses, you can configure IPSets to perform multiple DNS queries:
+
+```
+#resolve: example.com #queries=3 #delay=5
+```
+
+This configuration will:
+1. Query the domain 3 times (instead of the default once)
+2. Wait 5 seconds between each query (instead of the default 3 seconds)
+3. Collect all unique IP addresses from all queries
+
+The syntax options are:
+- `#queries=N` - Number of times to query each domain (default: 1)
+- `#delay=N` - Delay in seconds between queries (default: 3)
+
+This feature is especially useful for domains that use DNS-based load balancing or geographic distribution, ensuring your firewall rules include all possible IP addresses the domain might resolve to.
+
+Note: This feature is only available for IPSets, not for aliases (which always use only the first IP address from the first query).

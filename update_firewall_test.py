@@ -189,6 +189,100 @@ class UpdateFirewallObjectsTestCase(unittest.TestCase):
         # 192.168.1.1 should be removed, but the alias refs should be preserved
         self.assertNotIn('192.168.1.1', self.deps.object_content[FirewallObjectType.IPSET]['ipset_with_alias_refs'])
 
+    def test_get_resolve_options(self):
+        # Test default options
+        entry = FirewallEntry(
+            name='ipset1', 
+            cidr='192.168.1.1', 
+            comment='#resolve: example.com', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        options = entry.get_resolve_options()
+        self.assertEqual(1, options['queries'])
+        self.assertEqual(3, options['delay'])
+        
+        # Test with custom queries
+        entry = FirewallEntry(
+            name='ipset2', 
+            cidr='192.168.1.1', 
+            comment='#resolve: example.com #queries=5', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        options = entry.get_resolve_options()
+        self.assertEqual(5, options['queries'])
+        self.assertEqual(3, options['delay'])
+        
+        # Test with custom delay
+        entry = FirewallEntry(
+            name='ipset3', 
+            cidr='192.168.1.1', 
+            comment='#resolve: example.com #delay=1.5', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        options = entry.get_resolve_options()
+        self.assertEqual(1, options['queries'])
+        self.assertEqual(1.5, options['delay'])
+        
+        # Test with both custom options
+        entry = FirewallEntry(
+            name='ipset4', 
+            cidr='192.168.1.1', 
+            comment='#resolve: example.com #queries=3 #delay=2', 
+            obj_type=FirewallObjectType.IPSET
+        )
+        options = entry.get_resolve_options()
+        self.assertEqual(3, options['queries'])
+        self.assertEqual(2, options['delay'])
+
+    def test_multiple_dns_queries(self):
+        # GIVEN
+        # IPSet with multiple query configuration
+        self.deps.set_entry(FirewallEntry(
+            name='ipset_multi_query', 
+            cidr='192.168.1.1', 
+            comment='#resolve: rotating.example.com #queries=3 #delay=0.1', 
+            obj_type=FirewallObjectType.IPSET
+        ))
+        
+        # Mock DNS resolver to return different IPs on each call
+        original_dns_resolve = self.deps.dns_resolve
+        query_count = 0
+        
+        def mock_dns_resolve(domain, queries=1, delay=3.0):
+            nonlocal query_count
+            if domain == 'rotating.example.com':
+                all_ips = []
+                # Simulate multiple queries returning different IPs
+                for i in range(queries):
+                    query_count += 1
+                    if i == 0:
+                        all_ips.extend(['10.0.0.1', '10.0.0.2'])
+                    elif i == 1:
+                        all_ips.extend(['10.0.0.3', '10.0.0.4'])
+                    else:
+                        all_ips.extend(['10.0.0.5', '10.0.0.6'])
+                return all_ips
+            return original_dns_resolve(domain, queries, delay)
+        
+        # Replace the DNS resolver with our mock
+        self.deps.dns_resolve = mock_dns_resolve
+        
+        try:
+            # WHEN
+            update_firewall_objects(self.deps, FirewallObjectType.IPSET)
+            
+            # THEN
+            # Should have all IPs from all queries
+            expected_ips = ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4', '10.0.0.5', '10.0.0.6']
+            self.assertEqual(sorted(expected_ips), 
+                           sorted(self.deps.object_content[FirewallObjectType.IPSET]['ipset_multi_query']))
+            
+            # Should have made 3 queries as configured
+            self.assertEqual(3, query_count)
+        finally:
+            # Restore the original DNS resolver
+            self.deps.dns_resolve = original_dns_resolve
+
 
 class DependenciesFake(Dependencies):
     """Fake implementation of Dependencies interface for testing."""
@@ -236,7 +330,7 @@ class DependenciesFake(Dependencies):
         """Get all CIDRs for a specific IPSet or Alias."""
         return self.object_content[obj_type].get(name, [])
 
-    def dns_resolve(self, domain: str) -> List[str]:
+    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0) -> List[str]:
         """Resolve a domain to a list of IP addresses."""
         result = self.dns_entries.get(domain, [])
         # Handle both string and list formats for backward compatibility

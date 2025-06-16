@@ -13,7 +13,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import List, Dict
 
-VERSION_STRING = f'{Path(__file__).name} version 1.0.0'
+VERSION_STRING = f'{Path(__file__).name} version 3.4.0'
 
 
 class FirewallObjectType(Enum):
@@ -53,6 +53,51 @@ class FirewallEntry:
         except:
             return []
             
+    def get_resolve_options(self) -> dict:
+        """Extract resolve options from comment.
+        
+        Comment format can include options:
+        #resolve: domain1.com,domain2.com #queries=3 #delay=5
+        
+        Returns:
+            Dictionary with the following keys:
+            - queries: Number of times to query each domain (default: 1)
+            - delay: Delay in seconds between queries (default: 3)
+        """
+        options = {
+            'queries': 1,  # Default to 1 query
+            'delay': 3     # Default to 3 seconds delay
+        }
+        
+        try:
+            if not self.comment:
+                return options
+                
+            # Look for #queries= option
+            if '#queries=' in self.comment:
+                queries_str = self.comment.split('#queries=')[1].split(' ')[0]
+                try:
+                    queries = int(queries_str)
+                    if queries > 0:
+                        options['queries'] = queries
+                except ValueError:
+                    pass
+            
+            # Look for #delay= option
+            if '#delay=' in self.comment:
+                delay_str = self.comment.split('#delay=')[1].split(' ')[0]
+                try:
+                    delay = float(delay_str)
+                    if delay > 0:
+                        options['delay'] = delay
+                except ValueError:
+                    pass
+                    
+        except:
+            pass
+            
+        return options
+            
     def domain(self) -> str | None:
         """Legacy method for backward compatibility. Returns the first domain or None."""
         domains = self.domains()
@@ -82,8 +127,17 @@ class Dependencies:
         """Get all CIDRs for a specific IPSet or Alias."""
         ...
 
-    def dns_resolve(self, domain: str) -> List[str]:
-        """Resolve a domain to a list of IP addresses."""
+    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0) -> List[str]:
+        """Resolve a domain to a list of IP addresses.
+        
+        Args:
+            domain: The domain to resolve
+            queries: Number of times to query the domain
+            delay: Delay in seconds between queries
+        
+        Returns:
+            A list of IP addresses from all queries combined
+        """
         ...
 
 
@@ -170,11 +224,19 @@ def update_firewall_objects(deps: Dependencies, obj_type: FirewallObjectType):
             # For IPSets, collect IPs from all domains
             all_dns_ips = []
             
+            # Get the resolve options for this entry
+            options = entry.get_resolve_options()
+            queries = options['queries']
+            delay = options['delay']
+            
+            if queries > 1 and deps.verbose:
+                log(f'Will perform {queries} queries for each domain with {delay} seconds delay')
+                
             # Resolve each domain and collect all unique IPs
             for domain in domains:
-                dns_ips = deps.dns_resolve(domain)
+                dns_ips = deps.dns_resolve(domain, queries=queries, delay=delay)
                 if dns_ips:
-                    if deps.verbose:
+                    if deps.verbose and queries <= 1:
                         log(f'Domain {domain} resolved to {len(dns_ips)} IP(s): {dns_ips}')
                     all_dns_ips.extend(dns_ips)
                 else:
@@ -321,15 +383,45 @@ class ProdDependencies(Dependencies):
             obj = json.loads(run.stdout)
             return [obj.get('cidr', '')]
     
-    def dns_resolve(self, domain: str) -> List[str]:
-        """Resolve a domain to a list of IP addresses."""
-        try:
-            (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
-            if self.verbose:
-                log(f'{domain} resolved to `{ipaddrlist}`')
-            return ipaddrlist
-        except:
-            return []
+    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0) -> List[str]:
+        """Resolve a domain to a list of IP addresses.
+        
+        Args:
+            domain: The domain to resolve
+            queries: Number of times to query the domain
+            delay: Delay in seconds between queries
+            
+        Returns:
+            A list of IP addresses from all queries combined
+        """
+        all_ips = []
+        
+        for i in range(queries):
+            if i > 0 and delay > 0:
+                if self.verbose:
+                    log(f'Waiting {delay} seconds before next query for {domain}...')
+                import time
+                time.sleep(delay)
+                
+            try:
+                (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
+                if self.verbose:
+                    log(f'Query {i+1}/{queries}: {domain} resolved to {ipaddrlist}')
+                all_ips.extend(ipaddrlist)
+            except Exception as e:
+                if self.verbose:
+                    log(f'Query {i+1}/{queries}: Failed to resolve {domain}: {str(e)}')
+        
+        # Remove duplicates while preserving order
+        unique_ips = []
+        for ip in all_ips:
+            if ip not in unique_ips:
+                unique_ips.append(ip)
+                
+        if self.verbose and queries > 1:
+            log(f'All queries for {domain} returned {len(all_ips)} IPs, {len(unique_ips)} unique: {unique_ips}')
+            
+        return unique_ips
     
     def _run(self, cmd, skip: bool) -> Run | None:
         """Run a command and return the result."""
