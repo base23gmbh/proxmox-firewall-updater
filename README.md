@@ -12,8 +12,13 @@ You can also add a regular comment along with the resolve directive.
 
 Note: IPSets and aliases handle IP addresses differently:
 
-- **IPSets**: Can contain multiple IP addresses from DNS resolution
-- **Aliases**: Only use the first IP address from DNS resolution
+- **IPSets**: 
+  - Can contain multiple IP addresses from DNS resolution
+  - Support multiple comma-separated domain names (e.g., `#resolve: example.com,example.org`)
+  - All IP addresses from all domains will be included in the IPSet
+- **Aliases**: 
+  - Only use the first IP address from DNS resolution 
+  - If multiple domains are specified, only the first domain is used
 
 The script only updates entries if the IP address(es) of the corresponding domain name change in order to minimize logging.
 
