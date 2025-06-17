@@ -27,6 +27,42 @@ Note: IPSets and aliases handle IP addresses differently:
 
 The script only updates entries if the IP address(es) of the corresponding domain name change in order to minimize logging.
 
+## Table of Contents
+
+- [Proxmox Firewall Updater](#proxmox-firewall-updater)
+  - [Table of Contents](#table-of-contents)
+  - [Installation](#installation)
+    - [Scheduling with Cron](#scheduling-with-cron)
+    - [Scheduling without Cron](#scheduling-without-cron)
+  - [Command Line Options](#command-line-options)
+    - [Custom DNS Servers](#custom-dns-servers)
+  - [Logging](#logging)
+  - [Internal Workings](#internal-workings)
+    - [Automated Tests](#automated-tests)
+    - [Proxmox API](#proxmox-api)
+      - [pvesh get](#pvesh-get)
+      - [pvesh create/set](#pvesh-createset)
+    - [Relevant Proxmox Forum Thread](#relevant-proxmox-forum-thread)
+    - [Advanced Features](#advanced-features)
+      - [Multiple Queries for DNS Round-Robin](#multiple-queries-for-dns-round-robin)
+      - [Per-Entry DNS Server Override](#per-entry-dns-server-override)
+        - [DNS Server Priority](#dns-server-priority)
+        - [Special Keywords](#special-keywords)
+        - [Use Cases](#use-cases)
+        - [Examples](#examples)
+    - [Configuration Syntax](#configuration-syntax)
+      - [Available Options](#available-options)
+      - [Examples](#examples-1)
+    - [Migrating from Old to New Syntax](#migrating-from-old-to-new-syntax)
+      - [Old Syntax](#old-syntax)
+      - [New Syntax](#new-syntax)
+      - [How to Migrate](#how-to-migrate)
+    - [Troubleshooting](#troubleshooting)
+      - [DNS Resolution Issues](#dns-resolution-issues)
+      - [Custom DNS Server Issues](#custom-dns-server-issues)
+      - [Multiple Queries Not Working](#multiple-queries-not-working)
+      - [Alias References Not Being Preserved](#alias-references-not-being-preserved)
+
 ## Installation
 
 To get the script on your Proxmox server, run the following command in your pve shell:
@@ -125,9 +161,18 @@ pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 9.9.9.9
 pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 --ipsets --verbose --dry-run
 ```
 
-# Internal Workings
+## Logging
 
-## Automated Tests
+The script is sending it's tog to the syslog tagged with `pve-firewall-dns-updater`.  
+You can retrieve the logs by using:
+
+```bash
+journalctl -xef -t pve-firewall-dns-updater
+```
+
+## Internal Workings
+
+### Automated Tests
 
 This project includes comprehensive automated tests to ensure its reliability and correctness. These tests cover various scenarios and edge cases, providing a robust safety net for ongoing development.
 
@@ -139,11 +184,11 @@ To run the tests, clone the repo and use the following command:
 python3 -m unittest update_firewall_test.py
 ```
 
-## Proxmox API
+### Proxmox API
 
 The script uses `pvesh` commands to interact with Proxmox VE firewall objects. For more details, refer to the [Proxmox VE API documentation](https://pve.proxmox.com/pve-docs/api-viewer/index.html).
 
-### pvesh get
+#### pvesh get
 
 Get IPSets:
 
@@ -182,7 +227,7 @@ Example output:
 ]
 ```
 
-### pvesh create/set
+#### pvesh create/set
 
 Creating or updating an IPSet:
 
@@ -196,13 +241,13 @@ Updating an alias:
 
 `pvesh set cluster/firewall/aliases/alias_example_com --cidr 1.2.3.4 --comment "#resolve: example.com"`
 
-## Relevant Proxmox Forum Thread
+### Relevant Proxmox Forum Thread
 
 For more information, check out this [Proxmox Forum thread](https://forum.proxmox.com/threads/firewall-alias-with-domainname.43036/) on firewall aliases with domain names.
 
-## Advanced Features
+### Advanced Features
 
-### Multiple Queries for DNS Round-Robin
+#### Multiple Queries for DNS Round-Robin
 
 Some domains use DNS round-robin or similar techniques to distribute load, returning different IP addresses on successive DNS queries. To capture all these IP addresses, you can configure IPSets to perform multiple DNS queries:
 
@@ -225,7 +270,7 @@ This feature is especially useful for domains that use DNS-based load balancing 
 
 Note: This feature is only available for IPSets, not for aliases (which always use only the first IP address from the first query).
 
-### Per-Entry DNS Server Override
+#### Per-Entry DNS Server Override
 
 You can override the DNS servers used for specific firewall entries by adding the `#dns-servers=` option to the comment. This allows fine-grained control over DNS resolution on a per-entry basis.
 
@@ -239,7 +284,7 @@ This configuration will:
 2. Override any DNS servers specified via the `--dns-servers` command line option
 3. Fall back to system DNS if the custom servers fail
 
-#### DNS Server Priority
+##### DNS Server Priority
 
 The DNS server selection follows this priority order:
 
@@ -247,11 +292,11 @@ The DNS server selection follows this priority order:
 2. **CLI DNS servers** (`--dns-servers`) - medium priority  
 3. **System DNS servers** - lowest priority (fallback)
 
-#### Special Keywords
+##### Special Keywords
 
 - `#dns-servers=system` - Forces the use of system DNS servers, ignoring any CLI DNS servers
 
-#### Use Cases
+##### Use Cases
 
 This feature is particularly useful when:
 
@@ -260,7 +305,7 @@ This feature is particularly useful when:
 - You want to force system DNS for specific entries while using custom DNS for others
 - Troubleshooting DNS resolution issues for specific domains
 
-#### Examples
+##### Examples
 
 1. **Use specific DNS servers for one entry:**
 
@@ -288,7 +333,7 @@ This feature is particularly useful when:
 
 This feature works for both IPSets and Aliases, giving you maximum flexibility in DNS configuration.
 
-## Configuration Syntax
+### Configuration Syntax
 
 When configuring firewall objects for DNS resolution, you can use the following comment syntax:
 
@@ -296,14 +341,14 @@ When configuring firewall objects for DNS resolution, you can use the following 
 #resolve=domain1.com,domain2.com #queries=3 #delay=5
 ```
 
-### Available Options
+#### Available Options
 
 - `#resolve=domains`: Specifies one or more domain names (comma-separated) to resolve.
 - `#queries=N`: Number of DNS queries to perform for each domain (default: 1).
 - `#delay=N`: Delay in seconds between multiple queries (default: 3).
 - `#dns-servers=servers`: Specifies custom DNS servers for this specific entry (comma-separated). Use `system` to force system DNS.
 
-### Examples
+#### Examples
 
 1. Basic IPSet with a single domain:
 
@@ -338,23 +383,23 @@ When configuring firewall objects for DNS resolution, you can use the following 
 > [!NOTE]
 > For backward compatibility, the older syntax `#resolve:` is still supported, but the new `#resolve=` syntax is preferred for consistency.
 
-## Migrating from Old to New Syntax
+### Migrating from Old to New Syntax
 
 With version 3.5.0, we introduced a more consistent syntax for configuration options. While the older syntax is still supported for backward compatibility, we recommend migrating to the new syntax:
 
-### Old Syntax
+#### Old Syntax
 
 ```text
 #resolve: example.com
 ```
 
-### New Syntax
+#### New Syntax
 
 ```text
 #resolve=example.com
 ```
 
-### How to Migrate
+#### How to Migrate
 
 You can update your firewall objects in the Proxmox web interface by editing the comments:
 
@@ -364,9 +409,9 @@ You can update your firewall objects in the Proxmox web interface by editing the
 
 This will make your configuration more consistent and future-proof. The old syntax will continue to work for backward compatibility, so there is no urgency to update all at once.
 
-## Troubleshooting
+### Troubleshooting
 
-### DNS Resolution Issues
+#### DNS Resolution Issues
 
 If you're having trouble with DNS resolution:
 
@@ -396,7 +441,7 @@ If you're having trouble with DNS resolution:
    nslookup example.com 8.8.8.8
    ```
 
-### Custom DNS Server Issues
+#### Custom DNS Server Issues
 
 If you're having trouble with custom DNS servers:
 
@@ -433,7 +478,7 @@ If you're having trouble with custom DNS servers:
    python3 update_firewall.py --dns-servers 9.9.9.9 149.112.112.112
    ```
 
-### Multiple Queries Not Working
+#### Multiple Queries Not Working
 
 If multiple queries (`#queries=N`) aren't returning different IP addresses:
 
@@ -441,7 +486,7 @@ If multiple queries (`#queries=N`) aren't returning different IP addresses:
 2. Try increasing the delay (`#delay=10`) to allow for DNS cache timeout
 3. Make sure your DNS server isn't caching responses locally
 
-### Alias References Not Being Preserved
+#### Alias References Not Being Preserved
 
 If your alias references (starting with `dc/` or `guest/`) aren't being preserved:
 
