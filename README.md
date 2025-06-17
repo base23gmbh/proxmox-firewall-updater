@@ -10,7 +10,8 @@ For example, an IPSet or alias with the comment `#resolve=example.com` will be u
 
 You can also add a regular comment along with the resolve directive.
 
-> Note: The older syntax with `#resolve:` is still supported for backward compatibility, but the new syntax with `#resolve=` is preferred for consistency with other options.
+> [!NOTE]
+> The older syntax with `#resolve:` is still supported for backward compatibility, but the new syntax with `#resolve=` is preferred for consistency with other options.
 
 Note: IPSets and aliases handle IP addresses differently:
 
@@ -31,7 +32,9 @@ The script only updates entries if the IP address(es) of the corresponding domai
 To get the script on your Proxmox server, run the following command in your pve shell:
 
 ```bash
-curl https://raw.githubusercontent.com/base23gmbh/proxmox-firewall-updater/main/update_firewall.py -o update_firewall.py
+curl https://raw.githubusercontent.com/base23gmbh/proxmox-firewall-updater/main/update_firewall.py -o update_firewall.py \
+  && install -g root -o root -m 750 ./update_firewall.py /usr/local/sbin/pve-firewall-dns-updater \
+  && rm ./update_firewall.py
 ```
 
 ### Scheduling with Cron
@@ -39,7 +42,7 @@ curl https://raw.githubusercontent.com/base23gmbh/proxmox-firewall-updater/main/
 You can add a cron job to run the script every 5 minutes:
 
 ```bash
-(crontab -l 2>/dev/null; echo "*/5 * * * * /usr/bin/env python3 $(pwd)/update_firewall.py 2>&1 | logger -t update_firewall.py") | crontab -
+(crontab -l 2>/dev/null; echo "*/5 * * * * /usr/bin/env python3 /usr/local/sbin/pve-firewall-dns-updater 2>&1 | logger -t pve-firewall-dns-updater") | crontab -
 ```
 
 The cron daemon will log the execution of the script to the system log which is usually too verbose.
@@ -51,7 +54,7 @@ If you prefer to avoid verbose cron job logs, you can create a bash script with 
 To activate this script, add it to the @reboot cron job:
 
 ```bash
-echo "while true; do (python3 $(pwd)/update_firewall.py | logger -t update_firewall.py); sleep 300; done" > firewall_updater_forever.sh
+echo "while true; do (python3 /usr/local/sbin/pve-firewall-dns-updater | logger -t pve-firewall-dns-updater); sleep 300; done" > firewall_updater_forever.sh
 chmod +x firewall_updater_forever.sh
 (crontab -l 2>/dev/null; echo "@reboot /bin/bash -c $(pwd)/firewall_updater_forever.sh &") | crontab -
 ```
@@ -80,6 +83,12 @@ You can use multiple options together, for example:
 python3 update_firewall.py --ipsets --dry-run --verbose
 ```
 
+You can also use this command (as root), when installed as described previously:
+
+```bash
+pve-firewall-dns-updater --ipsets --dry-run --verbose
+```
+
 In this mode, the script will print detailed logs of its intended actions for IPSets without actually making any changes.
 
 # Internal Workings
@@ -98,7 +107,7 @@ python3 -m unittest update_firewall_test.py
 
 ## Proxmox API
 
-The script uses `pvesh` commands to interact with Proxmox VE firewall objects. For more details, refer to the Proxmox VE API documentation.
+The script uses `pvesh` commands to interact with Proxmox VE firewall objects. For more details, refer to the [Proxmox VE API documentation](https://pve.proxmox.com/pve-docs/api-viewer/index.html).
 
 ### pvesh get
 
@@ -163,16 +172,18 @@ For more information, check out this [Proxmox Forum thread](https://forum.proxmo
 
 Some domains use DNS round-robin or similar techniques to distribute load, returning different IP addresses on successive DNS queries. To capture all these IP addresses, you can configure IPSets to perform multiple DNS queries:
 
-```
+```text
 #resolve=example.com #queries=3 #delay=5
 ```
 
 This configuration will:
+
 1. Query the domain 3 times (instead of the default once)
 2. Wait 5 seconds between each query (instead of the default 3 seconds)
 3. Collect all unique IP addresses from all queries
 
 The syntax options are:
+
 - `#queries=N` - Number of times to query each domain (default: 1)
 - `#delay=N` - Delay in seconds between queries (default: 3)
 
@@ -184,7 +195,7 @@ Note: This feature is only available for IPSets, not for aliases (which always u
 
 When configuring firewall objects for DNS resolution, you can use the following comment syntax:
 
-```
+```text
 #resolve=domain1.com,domain2.com #queries=3 #delay=5
 ```
 
@@ -197,31 +208,37 @@ When configuring firewall objects for DNS resolution, you can use the following 
 ### Examples
 
 1. Basic IPSet with a single domain:
-   ```
+
+   ```text
    #resolve=example.com
    ```
 
 2. IPSet with multiple domains:
-   ```
+
+   ```text
    #resolve=example.com,example.org
    ```
 
 3. IPSet with multiple queries for DNS round-robin:
-   ```
+
+   ```text
    #resolve=load-balanced-service.com #queries=5 #delay=2
    ```
 
 4. IPSet with multiple domains and custom queries:
-   ```
+
+   ```text
    #resolve=service1.com,service2.com #queries=3 #delay=1
    ```
 
 5. Alias with a single domain (only uses first IP):
-   ```
+
+   ```text
    #resolve=example.com
    ```
 
-> Note: For backward compatibility, the older syntax `#resolve:` is still supported, but the new `#resolve=` syntax is preferred for consistency.
+> [!NOTE]
+> For backward compatibility, the older syntax `#resolve:` is still supported, but the new `#resolve=` syntax is preferred for consistency.
 
 ## Migrating from Old to New Syntax
 
@@ -229,13 +246,13 @@ With version 3.5.0, we introduced a more consistent syntax for configuration opt
 
 ### Old Syntax
 
-```
+```text
 #resolve: example.com
 ```
 
 ### New Syntax
 
-```
+```text
 #resolve=example.com
 ```
 
@@ -256,16 +273,19 @@ This will make your configuration more consistent and future-proof. The old synt
 If you're having trouble with DNS resolution:
 
 1. **Use the `--verbose` flag** to see detailed information:
-   ```
+
+   ```bash
    python3 update_firewall.py --verbose
    ```
 
 2. **Try multiple queries** for domains with round-robin DNS:
-   ```
+
+   ```text
    #resolve=example.com #queries=5
    ```
-   
+
 3. **Verify the domain is resolvable** from your Proxmox host:
+
    ```bash
    nslookup example.com
    ```
