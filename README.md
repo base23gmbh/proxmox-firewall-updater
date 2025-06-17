@@ -36,6 +36,13 @@ The script only updates entries if the IP address(es) of the corresponding domai
     - [Scheduling without Cron](#scheduling-without-cron)
   - [Command Line Options](#command-line-options)
     - [Custom DNS Servers](#custom-dns-servers)
+  - [Configuring IPSets and Aliases](#configuring-ipsets-and-aliases)
+    - [Understanding IPSets vs Aliases](#understanding-ipsets-vs-aliases)
+    - [Configuration Syntax](#configuration-syntax)
+    - [Step-by-Step Configuration Guide](#step-by-step-configuration-guide)
+    - [Configuration Examples](#configuration-examples)
+    - [Best Practices](#best-practices)
+    - [Common Configuration Scenarios](#common-configuration-scenarios)
   - [Logging](#logging)
   - [Internal Workings](#internal-workings)
     - [Automated Tests](#automated-tests)
@@ -50,7 +57,7 @@ The script only updates entries if the IP address(es) of the corresponding domai
         - [Special Keywords](#special-keywords)
         - [Use Cases](#use-cases)
         - [Examples](#examples)
-    - [Configuration Syntax](#configuration-syntax)
+    - [Configuration Syntax](#configuration-syntax-1)
       - [Available Options](#available-options)
       - [Examples](#examples-1)
     - [Migrating from Old to New Syntax](#migrating-from-old-to-new-syntax)
@@ -95,7 +102,7 @@ chmod +x firewall_updater_forever.sh
 (crontab -l 2>/dev/null; echo "@reboot /bin/bash -c $(pwd)/firewall_updater_forever.sh &") | crontab -
 ```
 
-Beware that the above will take effect at every reboot.
+Bewear that the above will take effect at every reboot.
 The first time, to avoid rebooting the server, you can run the bash script manually:
 
 ```bash
@@ -160,6 +167,72 @@ pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 9.9.9.9
 # Combine with other options
 pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 --ipsets --verbose --dry-run
 ```
+
+## Configuring IPSets and Aliases
+
+This section provides a comprehensive guide to configuring DNS-based firewall rules using IPSets and Aliases.
+
+### Understanding IPSets vs Aliases
+- **IPSets**:
+  - Support multiple IP addresses from multiple domains
+  - Preserve special alias references (dc/, guest/)
+  - Ideal for services with multiple endpoints or load-balanced services
+  - Can perform multiple DNS queries to capture all IPs
+  
+- **Aliases**:
+  - Only use the first IP address from the first domain
+  - Best for single-endpoint services
+  - Simpler configuration but less flexible
+
+### Configuration Syntax
+The core configuration syntax uses special comments in firewall objects:
+```text
+#resolve=domain1.com,domain2.com #queries=3 #delay=5 #dns-servers=8.8.8.8
+```
+
+### Step-by-Step Configuration Guide
+1. **Creating an IPSet**:
+   - Navigate to Datacenter → Firewall → IPSets
+   - Click "Create" and enter a name
+   - Add comment: `#resolve=example.com,backup.example.com #queries=3`
+   - Save the IPSet
+
+2. **Creating an Alias**:
+   - Navigate to Datacenter → Firewall → Aliases
+   - Click "Create" and enter a name
+   - Add comment: `#resolve=api.example.com`
+   - Save the Alias
+
+### Configuration Examples
+**Basic IPSet for a CDN service**:
+```text
+#resolve=cdn.example.com #queries=5 #delay=2
+```
+
+**Alias for a single-endpoint API**:
+```text
+#resolve=api.example.com
+```
+
+**IPSets with custom DNS servers**:
+```text
+#resolve=internal.service.com #dns-servers=192.168.1.10,192.168.1.11
+```
+
+### Best Practices
+1. Use IPSets for services with multiple IPs
+2. Use Aliases for simple, single-IP services
+3. Always include `#queries` for load-balanced services
+4. Specify `#dns-servers` for internal domains
+5. Combine domains in a single IPSet when they serve the same purpose
+
+### Common Configuration Scenarios
+| Scenario | Recommended Type | Example Configuration |
+|----------|------------------|----------------------|
+| Load-balanced web service | IPSet | `#resolve=web.example.com #queries=3` |
+| Single API endpoint | Alias | `#resolve=api.example.com` |
+| Internal service with custom DNS | IPSet | `#resolve=internal.service.com #dns-servers=192.168.1.10` |
+| Multi-region service | IPSet | `#resolve=us.service.com,eu.service.com` |
 
 ## Logging
 
@@ -243,7 +316,7 @@ Updating an alias:
 
 ### Relevant Proxmox Forum Thread
 
-For more information, check out this [Proxmox Forum thread](https://forum.proxmox.com/threads/firewall-alias-with-domainname.43036/) on firewall aliases with domain names.
+For more information, check out this [Proxmox Forum thread](https://forum.proxmox.com/threads/ffirewall-alias-with-domainname.43036/) on firewall aliases with domain names.
 
 ### Advanced Features
 
