@@ -76,6 +76,7 @@ The script supports several command line options:
 - `--aliases`: Only update aliases (don't process IPSets).
 - `--all`: Update both IPSets and aliases (default if no option is specified).
 - `--version`: Show version information and exit.
+- `--dns-servers`: Specify custom DNS servers to use for resolution (space-separated list). If not specified, uses system DNS servers.
 
 You can use multiple options together, for example:
 
@@ -90,6 +91,39 @@ pve-firewall-dns-updater --ipsets --dry-run --verbose
 ```
 
 In this mode, the script will print detailed logs of its intended actions for IPSets without actually making any changes.
+
+### Custom DNS Servers
+
+You can specify custom DNS servers to use for domain resolution instead of the system default DNS servers:
+
+```bash
+pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 --verbose
+```
+
+This is useful when:
+
+- You want to use specific DNS servers (like Google DNS, Cloudflare DNS, etc.)
+- Your system DNS configuration is not suitable for the domains you're resolving
+- You need to query authoritative DNS servers directly
+- You're troubleshooting DNS resolution issues
+
+The script will try each specified DNS server in order and combine the results. If all custom DNS servers fail, it will fall back to the system DNS servers.
+
+Examples of custom DNS server usage:
+
+```bash
+# Use Google DNS servers
+pve-firewall-dns-updater --dns-servers 8.8.8.8 8.8.4.4
+
+# Use Cloudflare DNS servers
+pve-firewall-dns-updater --dns-servers 1.1.1.1 1.0.0.1
+
+# Use multiple DNS servers for redundancy
+pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 9.9.9.9
+
+# Combine with other options
+pve-firewall-dns-updater --dns-servers 8.8.8.8 1.1.1.1 --ipsets --verbose --dry-run
+```
 
 # Internal Workings
 
@@ -191,6 +225,69 @@ This feature is especially useful for domains that use DNS-based load balancing 
 
 Note: This feature is only available for IPSets, not for aliases (which always use only the first IP address from the first query).
 
+### Per-Entry DNS Server Override
+
+You can override the DNS servers used for specific firewall entries by adding the `#dns-servers=` option to the comment. This allows fine-grained control over DNS resolution on a per-entry basis.
+
+```text
+#resolve=example.com #dns-servers=8.8.8.8,1.1.1.1
+```
+
+This configuration will:
+
+1. Use the specified DNS servers (8.8.8.8 and 1.1.1.1) for this specific entry
+2. Override any DNS servers specified via the `--dns-servers` command line option
+3. Fall back to system DNS if the custom servers fail
+
+#### DNS Server Priority
+
+The DNS server selection follows this priority order:
+
+1. **Comment DNS servers** (`#dns-servers=`) - highest priority
+2. **CLI DNS servers** (`--dns-servers`) - medium priority  
+3. **System DNS servers** - lowest priority (fallback)
+
+#### Special Keywords
+
+- `#dns-servers=system` - Forces the use of system DNS servers, ignoring any CLI DNS servers
+
+#### Use Cases
+
+This feature is particularly useful when:
+
+- Different domains require different DNS servers (e.g., internal vs external domains)
+- Some domains need authoritative DNS servers while others can use public DNS
+- You want to force system DNS for specific entries while using custom DNS for others
+- Troubleshooting DNS resolution issues for specific domains
+
+#### Examples
+
+1. **Use specific DNS servers for one entry:**
+
+   ```text
+   #resolve=internal.company.com #dns-servers=192.168.1.10,192.168.1.11
+   ```
+
+2. **Force system DNS for one entry while CLI uses custom DNS:**
+
+   ```text
+   #resolve=example.com #dns-servers=system
+   ```
+
+3. **Combine with other options:**
+
+   ```text
+   #resolve=service.com #queries=3 #delay=2 #dns-servers=8.8.8.8,1.1.1.1
+   ```
+
+4. **Multiple domains with custom DNS:**
+
+   ```text
+   #resolve=service1.com,service2.com #dns-servers=1.1.1.1,8.8.8.8
+   ```
+
+This feature works for both IPSets and Aliases, giving you maximum flexibility in DNS configuration.
+
 ## Configuration Syntax
 
 When configuring firewall objects for DNS resolution, you can use the following comment syntax:
@@ -204,6 +301,7 @@ When configuring firewall objects for DNS resolution, you can use the following 
 - `#resolve=domains`: Specifies one or more domain names (comma-separated) to resolve.
 - `#queries=N`: Number of DNS queries to perform for each domain (default: 1).
 - `#delay=N`: Delay in seconds between multiple queries (default: 3).
+- `#dns-servers=servers`: Specifies custom DNS servers for this specific entry (comma-separated). Use `system` to force system DNS.
 
 ### Examples
 
@@ -278,16 +376,61 @@ If you're having trouble with DNS resolution:
    python3 update_firewall.py --verbose
    ```
 
-2. **Try multiple queries** for domains with round-robin DNS:
+2. **Try custom DNS servers** if system DNS is not working properly:
+
+   ```bash
+   python3 update_firewall.py --dns-servers 8.8.8.8 1.1.1.1 --verbose
+   ```
+
+3. **Try multiple queries** for domains with round-robin DNS:
 
    ```text
    #resolve=example.com #queries=5
    ```
 
-3. **Verify the domain is resolvable** from your Proxmox host:
+4. **Verify the domain is resolvable** from your Proxmox host:
 
    ```bash
    nslookup example.com
+   # Or test with specific DNS server
+   nslookup example.com 8.8.8.8
+   ```
+
+### Custom DNS Server Issues
+
+If you're having trouble with custom DNS servers:
+
+1. **Verify the DNS servers are reachable**:
+
+   ```bash
+   ping 8.8.8.8
+   ```
+
+2. **Test DNS resolution manually** with dig:
+
+   ```bash
+   dig @8.8.8.8 example.com A
+   ```
+
+3. **Check if dig is installed** (required for custom DNS servers):
+
+   ```bash
+   which dig
+   # If not installed, install it:
+   apt-get update && apt-get install dnsutils
+   ```
+
+4. **Try different DNS servers** if some are not responding:
+
+   ```bash
+   # Google DNS
+   python3 update_firewall.py --dns-servers 8.8.8.8 8.8.4.4
+   
+   # Cloudflare DNS
+   python3 update_firewall.py --dns-servers 1.1.1.1 1.0.0.1
+   
+   # Quad9 DNS
+   python3 update_firewall.py --dns-servers 9.9.9.9 149.112.112.112
    ```
 
 ### Multiple Queries Not Working

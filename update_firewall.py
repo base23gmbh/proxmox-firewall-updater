@@ -13,7 +13,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import List, Dict
 
-VERSION_STRING = f'{Path(__file__).name} version 3.5.0'
+VERSION_STRING = f'{Path(__file__).name} version 3.6.0'
 
 
 class FirewallObjectType(Enum):
@@ -102,6 +102,31 @@ class FirewallEntry:
             pass
             
         return options
+    
+    def dns_servers(self) -> List[str] | None:
+        """Extract DNS servers from comment if it contains #dns-servers= directive.
+        
+        Comment format: #dns-servers=8.8.8.8,1.1.1.1 or #dns-servers=system
+        
+        Returns:
+            A list of DNS server IP addresses, or None if not specified.
+            Returns an empty list if #dns-servers=system is specified (forces system DNS).
+        """
+        try:
+            if self.comment and '#dns-servers=' in self.comment:
+                servers_str = self.comment.split('#dns-servers=')[1].split(' ')[0]
+                if servers_str:
+                    # Handle special 'system' keyword
+                    if servers_str.lower() == 'system':
+                        return []  # Empty list means force system DNS
+                    
+                    # Split by comma to support multiple DNS servers
+                    servers = [server.strip() for server in servers_str.split(',')]
+                    return [server for server in servers if server]  # Filter out empty servers
+            
+            return None  # No #dns-servers= directive found
+        except:
+            return None
             
     def domain(self) -> str | None:
         """Legacy method for backward compatibility. Returns the first domain or None."""
@@ -115,6 +140,7 @@ class Dependencies:
     def __init__(self):
         self.verbose = True
         self.dry_run = True
+        self.dns_servers = None
 
     def list_entries(self, obj_type: FirewallObjectType) -> List[FirewallEntry]:
         """List all entries of the specified type."""
@@ -132,13 +158,16 @@ class Dependencies:
         """Get all CIDRs for a specific IPSet or Alias."""
         ...
 
-    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0) -> List[str]:
+    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0, custom_dns_servers: List[str] | None = None) -> List[str]:
         """Resolve a domain to a list of IP addresses.
         
         Args:
             domain: The domain to resolve
             queries: Number of times to query the domain
             delay: Delay in seconds between queries
+            custom_dns_servers: Custom DNS servers to use for this specific resolution.
+                               If None, uses the default DNS servers (CLI or system).
+                               If empty list, forces system DNS.
         
         Returns:
             A list of IP addresses from all queries combined
@@ -225,6 +254,9 @@ def update_firewall_objects(deps: Dependencies, obj_type: FirewallObjectType):
     for entry in entries:
         domains = entry.domains()
         
+        # Get entry-specific DNS servers from comment
+        entry_dns_servers = entry.dns_servers()
+        
         if obj_type == FirewallObjectType.IPSET:
             # For IPSets, collect IPs from all domains
             all_dns_ips = []
@@ -239,7 +271,7 @@ def update_firewall_objects(deps: Dependencies, obj_type: FirewallObjectType):
                 
             # Resolve each domain and collect all unique IPs
             for domain in domains:
-                dns_ips = deps.dns_resolve(domain, queries=queries, delay=delay)
+                dns_ips = deps.dns_resolve(domain, queries=queries, delay=delay, custom_dns_servers=entry_dns_servers)
                 if dns_ips:
                     if deps.verbose and queries <= 1:
                         log(f'Domain {domain} resolved to {len(dns_ips)} IP(s): {dns_ips}')
@@ -307,7 +339,7 @@ def update_firewall_objects(deps: Dependencies, obj_type: FirewallObjectType):
         else:  # Alias objects only support a single IP and single domain
             # For Aliases, use only the first domain and its first IP address
             domain = domains[0]
-            dns_ips = deps.dns_resolve(domain)
+            dns_ips = deps.dns_resolve(domain, custom_dns_servers=entry_dns_servers)
             
             if dns_ips:
                 # For Aliases, use the first IP address only
@@ -336,6 +368,7 @@ class ProdDependencies(Dependencies):
         super().__init__()
         self.verbose = args.verbose
         self.dry_run = args.dry_run
+        self.dns_servers = args.dns_servers
     
     def list_entries(self, obj_type: FirewallObjectType) -> List[FirewallEntry]:
         """List all entries of the specified type."""
@@ -388,18 +421,36 @@ class ProdDependencies(Dependencies):
             obj = json.loads(run.stdout)
             return [obj.get('cidr', '')]
     
-    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0) -> List[str]:
+    def dns_resolve(self, domain: str, queries: int = 1, delay: float = 3.0, custom_dns_servers: List[str] | None = None) -> List[str]:
         """Resolve a domain to a list of IP addresses.
         
         Args:
             domain: The domain to resolve
             queries: Number of times to query the domain
             delay: Delay in seconds between queries
+            custom_dns_servers: Custom DNS servers to use for this specific resolution.
+                               If None, uses the default DNS servers (CLI or system).
+                               If empty list, forces system DNS.
             
         Returns:
             A list of IP addresses from all queries combined
         """
         all_ips = []
+        
+        # Determine which DNS servers to use
+        effective_dns_servers = None
+        force_system_dns = False
+        
+        if custom_dns_servers is not None:
+            if len(custom_dns_servers) == 0:
+                # Empty list means force system DNS (from #dns-servers=system)
+                force_system_dns = True
+            else:
+                # Use the custom DNS servers from the comment
+                effective_dns_servers = custom_dns_servers
+        else:
+            # Use CLI DNS servers if available
+            effective_dns_servers = self.dns_servers
         
         for i in range(queries):
             if i > 0 and delay > 0:
@@ -409,9 +460,24 @@ class ProdDependencies(Dependencies):
                 time.sleep(delay)
                 
             try:
-                (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
+                if force_system_dns:
+                    # Force system DNS (ignore CLI --dns-servers)
+                    (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
+                    dns_info = " using system DNS (forced by #dns-servers=system)"
+                elif effective_dns_servers:
+                    # Use custom DNS servers with dig command
+                    ipaddrlist = self._resolve_with_custom_dns(domain, effective_dns_servers)
+                    if custom_dns_servers is not None:
+                        dns_info = f" using comment DNS servers {effective_dns_servers}"
+                    else:
+                        dns_info = f" using CLI DNS servers {effective_dns_servers}"
+                else:
+                    # Use system DNS
+                    (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
+                    dns_info = " using system DNS"
+                    
                 if self.verbose:
-                    log(f'Query {i+1}/{queries}: {domain} resolved to {ipaddrlist}')
+                    log(f'Query {i+1}/{queries}: {domain} resolved to {ipaddrlist}{dns_info}')
                 all_ips.extend(ipaddrlist)
             except Exception as e:
                 if self.verbose:
@@ -427,6 +493,67 @@ class ProdDependencies(Dependencies):
             log(f'All queries for {domain} returned {len(all_ips)} IPs, {len(unique_ips)} unique: {unique_ips}')
             
         return unique_ips
+    
+    def _resolve_with_custom_dns(self, domain: str, dns_servers: List[str] = None) -> List[str]:
+        """Resolve domain using custom DNS servers via dig command.
+        
+        Args:
+            domain: The domain to resolve
+            dns_servers: List of DNS servers to use (defaults to self.dns_servers)
+            
+        Returns:
+            A list of IP addresses
+        """
+        if dns_servers is None:
+            dns_servers = self.dns_servers or []
+            
+        all_ips = []
+        
+        for dns_server in dns_servers:
+            try:
+                # Use dig command with specific DNS server
+                cmd = ['dig', '+short', f'@{dns_server}', domain, 'A']
+                run = Run(cmd)
+                
+                if run.success and run.stdout.strip():
+                    # Parse dig output - each line should be an IP address
+                    ips = [line.strip() for line in run.stdout.strip().split('\n') if line.strip()]
+                    # Filter out any non-IP responses (like CNAME records)
+                    valid_ips = []
+                    for ip in ips:
+                        try:
+                            # Validate IP address format
+                            socket.inet_aton(ip)
+                            valid_ips.append(ip)
+                        except socket.error:
+                            # Skip invalid IP addresses
+                            continue
+                    
+                    if valid_ips:
+                        all_ips.extend(valid_ips)
+                        if self.verbose:
+                            log(f'DNS server {dns_server} returned: {valid_ips}')
+                    elif self.verbose:
+                        log(f'DNS server {dns_server} returned no valid IP addresses for {domain}')
+                elif self.verbose:
+                    log(f'DNS server {dns_server} failed to resolve {domain}: {run.stderr.strip()}')
+                    
+            except Exception as e:
+                if self.verbose:
+                    log(f'Error querying DNS server {dns_server} for {domain}: {str(e)}')
+        
+        # If no custom DNS servers worked, fall back to system DNS
+        if not all_ips:
+            if self.verbose:
+                log(f'Custom DNS servers failed, falling back to system DNS for {domain}')
+            try:
+                (_, _, ipaddrlist) = socket.gethostbyname_ex(domain)
+                all_ips.extend(ipaddrlist)
+            except Exception as e:
+                if self.verbose:
+                    log(f'System DNS also failed for {domain}: {str(e)}')
+        
+        return all_ips
     
     def _run(self, cmd, skip: bool) -> Run | None:
         """Run a command and return the result."""
@@ -447,6 +574,7 @@ def main():
     parser.add_argument('--aliases', action='store_true', help='update Alias entries')
     parser.add_argument('--all', action='store_true', help='update both IPSet and Alias entries')
     parser.add_argument('--version', action='store_true', help='show version information and exit')
+    parser.add_argument('--dns-servers', nargs='+', help='DNS servers to use for resolution (default: system DNS servers)')
     
     args = parser.parse_args()
     
